@@ -576,26 +576,6 @@ show_deployment_info() {
 
 EOF
 
-    cat << EOF
-📊 Monitoring Dashboard (run separately):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Start:               cd monitoring && ./run.sh
-  Dashboard:           http://localhost:8888/
-
-EOF
-
-    cat << EOF
-📖 Documentation:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  README.md                    - Overview
-  QUICKSTART.md                - Quick start guide
-  TESTING_PLAN.md              - Testing procedures
-  docs/architecture.md         - Architecture details
-  docs/getting-started.md      - Getting started guide
-  docs/troubleshooting.md      - Troubleshooting guide
-  monitoring/README.md         - Visual monitoring dashboard guide
-
-EOF
 }
 
 # Main deployment flow
