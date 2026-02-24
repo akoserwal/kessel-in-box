@@ -102,6 +102,13 @@ cleanup_existing() {
         docker volume rm kafka-data 2>/dev/null || true
     fi
 
+    # Also clean up observability containers if requested
+    if [ "${WITH_OBSERVABILITY:-false}" = "true" ]; then
+        docker compose -f "$PROJECT_ROOT/compose/docker-compose.yml" \
+                       -f "$PROJECT_ROOT/compose/docker-compose.observability.yml" \
+                       down --remove-orphans 2>/dev/null || true
+    fi
+
     # Kill processes on conflicting ports
     for port in 2181 5432 5433 5434 8080 8081 8082 8083 8084 8086 9001 9002 9092 9101 50051 8443 9090; do
         pid=$(lsof -ti:$port 2>/dev/null || true)
@@ -420,6 +427,71 @@ deploy_phase7() {
     log_success "Phase 7 deployment complete!"
 }
 
+# Deploy Observability stack (Prometheus, Grafana, Alertmanager)
+deploy_observability() {
+    log_info "=========================================="
+    log_info "Deploying Observability Stack"
+    log_info "=========================================="
+
+    cd "$PROJECT_ROOT"
+
+    # Start Prometheus
+    log_info "Starting Prometheus..."
+    docker compose -f compose/docker-compose.yml \
+                   -f compose/docker-compose.observability.yml \
+                   up -d prometheus
+
+    # Wait for Prometheus
+    log_info "Waiting for Prometheus to be ready..."
+    for i in {1..30}; do
+        if curl -sf http://localhost:${PROMETHEUS_PORT:-9091}/-/healthy &>/dev/null; then
+            log_success "Prometheus ready"
+            break
+        fi
+        echo -n "."
+        sleep 2
+    done
+    echo ""
+
+    # Start Grafana (depends on Prometheus)
+    log_info "Starting Grafana..."
+    docker compose -f compose/docker-compose.yml \
+                   -f compose/docker-compose.observability.yml \
+                   up -d grafana
+
+    # Wait for Grafana
+    log_info "Waiting for Grafana to be ready..."
+    for i in {1..30}; do
+        if curl -sf http://localhost:${GRAFANA_PORT:-3000}/api/health &>/dev/null; then
+            log_success "Grafana ready"
+            break
+        fi
+        echo -n "."
+        sleep 2
+    done
+    echo ""
+
+    # Start Alertmanager
+    log_info "Starting Alertmanager..."
+    docker compose -f compose/docker-compose.yml \
+                   -f compose/docker-compose.observability.yml \
+                   up -d alertmanager
+
+    # Start Node Exporter
+    log_info "Starting Node Exporter..."
+    docker compose -f compose/docker-compose.yml \
+                   -f compose/docker-compose.observability.yml \
+                   up -d node-exporter 2>/dev/null || log_warn "Node Exporter failed (optional, may not work on macOS)"
+
+    # Build and start Health Exporter
+    log_info "Starting Health Exporter..."
+    docker compose -f compose/docker-compose.yml \
+                   -f compose/docker-compose.observability.yml \
+                   up -d health-exporter 2>/dev/null || log_warn "Health Exporter failed to start (optional)"
+
+    log_success "Observability stack deployment complete!"
+}
+
 # Verify deployment
 verify_deployment() {
     log_info "=========================================="
@@ -447,6 +519,11 @@ verify_deployment() {
     [ "${SKIP_INVENTORY_API:-false}" != "true" ] && expected_containers+=("kessel-inventory-api")
     [ "${SKIP_INSIGHTS_RBAC:-false}" != "true" ] && expected_containers+=("insights-rbac")
     [ "${SKIP_INSIGHTS_HOST_INVENTORY:-false}" != "true" ] && expected_containers+=("insights-host-inventory")
+
+    # Add observability containers if enabled
+    if [ "${WITH_OBSERVABILITY:-false}" = "true" ]; then
+        expected_containers+=("kessel-prometheus" "kessel-grafana" "kessel-alertmanager")
+    fi
 
     for container in "${expected_containers[@]}"; do
         if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
@@ -504,6 +581,32 @@ verify_deployment() {
         all_healthy=false
     fi
 
+    if [ "${WITH_OBSERVABILITY:-false}" = "true" ]; then
+        echo ""
+        log_info "Checking observability services..."
+
+        if curl -sf http://localhost:${PROMETHEUS_PORT:-9091}/-/healthy &>/dev/null; then
+            echo "  ✓ Prometheus: healthy"
+        else
+            echo -e "  ${RED}✗${NC} Prometheus: NOT RESPONDING"
+            all_healthy=false
+        fi
+
+        if curl -sf http://localhost:${GRAFANA_PORT:-3000}/api/health &>/dev/null; then
+            echo "  ✓ Grafana: healthy"
+        else
+            echo -e "  ${RED}✗${NC} Grafana: NOT RESPONDING"
+            all_healthy=false
+        fi
+
+        if curl -sf http://localhost:${ALERTMANAGER_PORT:-9093}/-/healthy &>/dev/null; then
+            echo "  ✓ Alertmanager: healthy"
+        else
+            echo -e "  ${RED}✗${NC} Alertmanager: NOT RESPONDING"
+            all_healthy=false
+        fi
+    fi
+
     echo ""
 
     if [ "$all_healthy" = true ]; then
@@ -544,6 +647,20 @@ show_deployment_info() {
   Relations Sink:          CDC consumer for RBAC
   Inventory Consumer:      CDC consumer for Inventory
 
+EOF
+
+    if [ "${WITH_OBSERVABILITY:-false}" = "true" ]; then
+        cat << EOF
+📈 Observability Stack:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Prometheus:          http://localhost:${PROMETHEUS_PORT:-9091}
+  Grafana:             http://localhost:${GRAFANA_PORT:-3000} (admin/admin)
+  Alertmanager:        http://localhost:${ALERTMANAGER_PORT:-9093}
+
+EOF
+    fi
+
+    cat << EOF
 📦 Databases:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   RBAC Database:           localhost:5432 (user: rbac)
@@ -607,6 +724,10 @@ main() {
                 export SKIP_INSIGHTS_HOST_INVENTORY=true
                 shift
                 ;;
+            --with-observability)
+                export WITH_OBSERVABILITY=true
+                shift
+                ;;
             --help)
                 cat << EOF
 Usage: $0 [OPTIONS]
@@ -618,12 +739,14 @@ Options:
   --skip-inventory-api         Skip kessel-inventory-api (run locally on port 8000)
   --skip-insights-rbac         Skip insights-rbac (run locally on port 8080)
   --skip-insights-host-inventory  Skip insights-host-inventory (run locally on port 8081)
+  --with-observability         Deploy Prometheus, Grafana, and Alertmanager
   --help                       Show this help message
 
 Examples:
   $0                          # Normal deployment
   $0 --clean-volumes          # Fresh deployment (removes data)
   $0 --skip-tests             # Deploy without verification
+  $0 --with-observability     # Deploy with Prometheus + Grafana + Alertmanager
 Local Development (skip services to run them from source locally):
   $0 --skip-inventory-api     # Run inventory-api locally on port 8000
   $0 --skip-relations-api     # Run relations-api locally on port 8000
@@ -652,6 +775,11 @@ EOF
     deploy_phase5
     deploy_phase6
     deploy_phase7
+
+    # Deploy observability if requested
+    if [ "${WITH_OBSERVABILITY:-false}" = "true" ]; then
+        deploy_observability
+    fi
 
     # Verify
     if verify_deployment; then
