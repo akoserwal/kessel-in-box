@@ -74,9 +74,9 @@ This verifies Docker, Podman, Docker Compose, and checks that all required ports
 ```
 
 **What deploys:**
-- Phase 5: Kessel Services (relations-api, inventory-api, SpiceDB)
-- Phase 6: CDC Infrastructure (Kafka, Debezium, CDC consumers) ← Included!
-- Phase 7: Insights Services (rbac, host-inventory)
+- Kessel Services (relations-api, inventory-api, SpiceDB)
+- CDC Infrastructure (Kafka, Debezium, CDC consumers) ← Included!
+- Insights Services (rbac, host-inventory)
 
 ### Deploy Individual Phases (Alternative)
 
