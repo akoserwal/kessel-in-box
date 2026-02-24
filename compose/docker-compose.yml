@@ -359,5 +359,5 @@ volumes:
 
 networks:
   kessel-network:
-    driver: bridge
+    external: true
     name: kessel-network
