@@ -197,10 +197,10 @@ deploy_phase5() {
                        -f compose/docker-compose.kessel.yml \
                        up -d kessel-relations-api
 
-        # Wait for Relations API
+        # Wait for Relations API (gRPC-only, no HTTP health endpoint)
         log_info "Waiting for Relations API to be ready..."
         for i in {1..60}; do
-            if curl -sf http://localhost:8082/health &>/dev/null; then
+            if grpcurl -plaintext localhost:${RELATIONS_GRPC_PORT:-9001} grpc.health.v1.Health/Check &>/dev/null; then
                 log_success "Relations API ready"
                 break
             fi
@@ -226,10 +226,10 @@ deploy_phase5() {
                        -f compose/docker-compose.kessel.yml \
                        up -d kessel-inventory-api
 
-        # Wait for Inventory API
+        # Wait for Inventory API (gRPC-only, no HTTP health endpoint)
         log_info "Waiting for Inventory API to be ready..."
         for i in {1..60}; do
-            if curl -sf http://localhost:8083/health &>/dev/null; then
+            if grpcurl -plaintext localhost:${INVENTORY_GRPC_PORT:-9002} grpc.health.v1.Health/Check &>/dev/null; then
                 log_success "Inventory API ready"
                 break
             fi
@@ -357,20 +357,15 @@ deploy_phase7() {
 
     cd "$PROJECT_ROOT"
 
-    # Build and start insights-rbac
+    # Start insights-rbac (real image: quay.io/cloudservices/rbac)
     if [ "${SKIP_INSIGHTS_RBAC:-false}" = "true" ]; then
         log_warn "SKIP_INSIGHTS_RBAC=true — Skipping insights-rbac"
         log_warn "  Run it locally on port 8080"
     else
-        log_info "Building insights-rbac service..."
-        docker compose -f compose/docker-compose.yml \
-                       -f compose/docker-compose.kessel.yml \
-                       -f compose/docker-compose.insights.yml \
-                       build insights-rbac
-
         log_info "Starting insights-rbac..."
         docker compose -f compose/docker-compose.yml \
                        -f compose/docker-compose.kessel.yml \
+                       -f compose/docker-compose.kafka.yml \
                        -f compose/docker-compose.insights.yml \
                        up -d insights-rbac
 
@@ -387,7 +382,7 @@ deploy_phase7() {
         echo ""
     fi
 
-    # Build and start insights-host-inventory
+    # Start insights-host-inventory (real image: quay.io/cloudservices/insights-inventory)
     if [ "${SKIP_INSIGHTS_HOST_INVENTORY:-false}" = "true" ]; then
         log_warn "SKIP_INSIGHTS_HOST_INVENTORY=true — Skipping insights-host-inventory"
         log_warn "  Run it locally on port 8081"
@@ -399,15 +394,10 @@ deploy_phase7() {
             log_info "Using --no-deps for insights-host-inventory (inventory-api is local)"
         fi
 
-        log_info "Building insights-host-inventory service..."
-        docker compose -f compose/docker-compose.yml \
-                       -f compose/docker-compose.kessel.yml \
-                       -f compose/docker-compose.insights.yml \
-                       build insights-host-inventory
-
         log_info "Starting insights-host-inventory..."
         docker compose -f compose/docker-compose.yml \
                        -f compose/docker-compose.kessel.yml \
+                       -f compose/docker-compose.kafka.yml \
                        -f compose/docker-compose.insights.yml \
                        up -d $nodeps_flag insights-host-inventory
 
@@ -547,8 +537,8 @@ verify_deployment() {
 
     if [ "${SKIP_RELATIONS_API:-false}" = "true" ]; then
         echo "  - Kessel Relations API: SKIPPED (local dev mode)"
-    elif curl -sf http://localhost:8082/health | grep -q "healthy"; then
-        echo "  ✓ Kessel Relations API: healthy"
+    elif grpcurl -plaintext localhost:${RELATIONS_GRPC_PORT:-9001} grpc.health.v1.Health/Check &>/dev/null; then
+        echo "  ✓ Kessel Relations API: SERVING"
     else
         echo -e "  ${RED}✗${NC} Kessel Relations API: NOT RESPONDING"
         all_healthy=false
@@ -556,8 +546,8 @@ verify_deployment() {
 
     if [ "${SKIP_INVENTORY_API:-false}" = "true" ]; then
         echo "  - Kessel Inventory API: SKIPPED (local dev mode)"
-    elif curl -sf http://localhost:8083/health | grep -q "healthy"; then
-        echo "  ✓ Kessel Inventory API: healthy"
+    elif grpcurl -plaintext localhost:${INVENTORY_GRPC_PORT:-9002} grpc.health.v1.Health/Check &>/dev/null; then
+        echo "  ✓ Kessel Inventory API: SERVING"
     else
         echo -e "  ${RED}✗${NC} Kessel Inventory API: NOT RESPONDING"
         all_healthy=false
@@ -565,7 +555,7 @@ verify_deployment() {
 
     if [ "${SKIP_INSIGHTS_RBAC:-false}" = "true" ]; then
         echo "  - Insights RBAC: SKIPPED (local dev mode)"
-    elif curl -sf http://localhost:8080/health | grep -q "healthy"; then
+    elif curl -sf http://localhost:8080/api/rbac/v1/status/ &>/dev/null; then
         echo "  ✓ Insights RBAC: healthy"
     else
         echo -e "  ${RED}✗${NC} Insights RBAC: NOT RESPONDING"
@@ -574,7 +564,7 @@ verify_deployment() {
 
     if [ "${SKIP_INSIGHTS_HOST_INVENTORY:-false}" = "true" ]; then
         echo "  - Insights Host Inventory: SKIPPED (local dev mode)"
-    elif curl -sf http://localhost:8081/health | grep -q "healthy"; then
+    elif curl -sf http://localhost:8081/health; then
         echo "  ✓ Insights Host Inventory: healthy"
     else
         echo -e "  ${RED}✗${NC} Insights Host Inventory: NOT RESPONDING"
@@ -674,10 +664,12 @@ EOF
     -H "Content-Type: application/json" \\
     -d '{"name":"my-workspace","description":"Test workspace"}'
 
-  # Create a host
-  curl -X POST http://localhost:8081/api/v1/hosts \\
+  # Create a host (requires x-rh-identity header)
+  IDENTITY=\$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"test_user","email":"test@example.com","is_org_admin":true}}}' | base64)
+  curl -X POST http://localhost:8081/api/inventory/v1/hosts \\
     -H "Content-Type: application/json" \\
-    -d '{"display_name":"my-host","canonical_facts":{"fqdn":"host.local"}}'
+    -H "x-rh-identity: \$IDENTITY" \\
+    -d '[{"display_name":"my-host","fqdn":"host.local","account":"12345","org_id":"12345","stale_timestamp":"2030-01-01T00:00:00.000Z","reporter":"test"}]'
 
   # Run automated tests
   ./scripts/run-all-tests.sh

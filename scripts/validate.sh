@@ -83,10 +83,10 @@ echo ""
 # 4. Service Health Check
 echo -e "${BLUE}=== Service Health ===${NC}"
 check "SpiceDB health" "curl -sf http://localhost:8443/healthz | grep -q SERVING"
-check "Kessel Relations API health" "curl -sf http://localhost:8082/health | grep -q healthy"
-check "Kessel Inventory API health" "curl -sf http://localhost:8083/health | grep -q healthy"
-check "Insights RBAC health" "curl -sf http://localhost:8080/health | grep -q healthy"
-check "Insights Host Inventory health" "curl -sf http://localhost:8081/health | grep -q healthy"
+check "Kessel Relations API health" "grpcurl -plaintext localhost:9001 grpc.health.v1.Health/Check"
+check "Kessel Inventory API health" "curl -sf http://localhost:8083/api/kessel/v1/livez"
+check "Insights RBAC health" "curl -sf http://localhost:8080/api/rbac/v1/status/"
+check "Insights Host Inventory health" "curl -sf http://localhost:8081/health"
 echo ""
 
 # 5. Port Accessibility Check

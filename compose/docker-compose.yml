@@ -37,6 +37,7 @@ services:
   postgres-inventory:
     image: postgres:15-alpine
     container_name: kessel-postgres-inventory
+    command: postgres -c wal_level=logical
     environment:
       POSTGRES_USER: inventory
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}

@@ -130,8 +130,8 @@ run_test "Inventory database accessible" \
     ""
 
 run_test "Inventory schema exists" \
-    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -c '\dn inventory;'" \
-    "inventory"
+    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -c '\dn hbi;'" \
+    "hbi"
 
 run_test "SpiceDB database accessible" \
     "docker exec kessel-postgres-spicedb psql -U spicedb -d spicedb -c 'SELECT 1;'" \
@@ -153,20 +153,20 @@ run_test "SpiceDB health endpoint" \
     "SERVING"
 
 run_test "Kessel Relations API health" \
-    "curl -sf http://localhost:8082/health" \
-    "healthy"
+    "grpcurl -plaintext localhost:9001 grpc.health.v1.Health/Check" \
+    "SERVING"
 
 run_test "Kessel Inventory API health" \
-    "curl -sf http://localhost:8083/health" \
-    "healthy"
+    "curl -sf http://localhost:8083/api/kessel/v1/livez" \
+    ""
 
 run_test "Insights RBAC health" \
-    "curl -sf http://localhost:8080/health" \
-    "healthy"
+    "curl -sf http://localhost:8080/api/rbac/v1/status/" \
+    ""
 
 run_test "Insights Host Inventory health" \
     "curl -sf http://localhost:8081/health" \
-    "healthy"
+    ""
 
 echo ""
 
@@ -175,11 +175,15 @@ echo ""
 # ============================================
 echo -e "${BLUE}=== 4. API Functional Tests ===${NC}"
 
+# Real RBAC requires x-rh-identity header with auth_type
+RBAC_IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"test_user","email":"test@example.com","is_org_admin":true}}}' | base64)
+
 # Create test workspace
 log_info "Creating test workspace..."
-WORKSPACE_RESP=$(curl -s -X POST http://localhost:8080/api/v1/workspaces \
+WORKSPACE_RESP=$(curl -s -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
     -H "Content-Type: application/json" \
-    -d '{"name":"test-suite-workspace","description":"Automated test"}')
+    -H "x-rh-identity: $RBAC_IDENTITY" \
+    -d '{"name":"test-suite-workspace"}')
 WORKSPACE_ID=$(echo "$WORKSPACE_RESP" | jq -r '.id')
 
 run_test "Create workspace (insights-rbac)" \
@@ -187,34 +191,26 @@ run_test "Create workspace (insights-rbac)" \
     ""
 
 run_test "Get workspace by ID" \
-    "curl -sf http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID" \
+    "curl -sf -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/$WORKSPACE_ID" \
     "$WORKSPACE_ID"
 
 run_test "List workspaces" \
-    "curl -sf http://localhost:8080/api/v1/workspaces | jq -r '.data[] | .id' | grep '$WORKSPACE_ID'" \
+    "curl -sf -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/ | jq -r '.data[] | .id' | grep '$WORKSPACE_ID'" \
     ""
 
-# Create test host
-log_info "Creating test host..."
-HOST_RESP=$(curl -s -X POST http://localhost:8081/api/v1/hosts \
-    -H "Content-Type: application/json" \
-    -d '{
-        "display_name":"test-suite-host",
-        "canonical_facts":{"fqdn":"test.example.com"},
-        "workspace_id":"'$WORKSPACE_ID'"
-    }')
-HOST_ID=$(echo "$HOST_RESP" | jq -r '.id')
+# Real HBI requires x-rh-identity header with auth_type
+HBI_IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"test_user","email":"test@example.com","is_org_admin":true}}}' | base64)
 
-run_test "Create host (insights-inventory)" \
-    "echo '$HOST_RESP' | jq -r '.id'" \
+# Note: The real HBI does not support host creation via REST API.
+# Hosts are created via Kafka ingress (platform.inventory.host-ingress topic).
+HOST_ID=""
+
+run_test "List hosts (insights-inventory)" \
+    "curl -sf -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/hosts" \
     ""
 
-run_test "Get host by ID" \
-    "curl -sf http://localhost:8081/api/v1/hosts/$HOST_ID" \
-    "$HOST_ID"
-
-run_test "List hosts" \
-    "curl -sf http://localhost:8081/api/v1/hosts | jq -r '.data[] | .id' | grep '$HOST_ID'" \
+run_test "Get tags endpoint" \
+    "curl -sf -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/tags" \
     ""
 
 echo ""
@@ -228,13 +224,9 @@ run_test "Workspace in RBAC database" \
     "docker exec kessel-postgres-rbac psql -U rbac -d rbac -c \"SELECT id FROM rbac.workspaces WHERE id = '$WORKSPACE_ID';\"" \
     "$WORKSPACE_ID"
 
-run_test "Host in Inventory database" \
-    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -c \"SELECT id FROM inventory.hosts WHERE id = '$HOST_ID';\"" \
-    "$HOST_ID"
-
-run_test "Resource in Kessel Inventory API" \
-    "curl -sf http://localhost:8083/api/inventory/v1/resources/$HOST_ID" \
-    "$HOST_ID"
+run_test "Inventory database HBI schema exists" \
+    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -c '\dt hbi.hosts'" \
+    "hosts"
 
 echo ""
 
@@ -259,8 +251,9 @@ echo -e "${BLUE}=== 7. End-to-End Flow Tests ===${NC}"
 
 # Create another workspace and verify full flow
 log_info "Testing complete workspace lifecycle..."
-E2E_WS=$(curl -s -X POST http://localhost:8080/api/v1/workspaces \
+E2E_WS=$(curl -s -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
     -H "Content-Type: application/json" \
+    -H "x-rh-identity: $RBAC_IDENTITY" \
     -d '{"name":"e2e-test-workspace"}' | jq -r '.id')
 
 run_test "E2E: Workspace creation" \
@@ -271,26 +264,13 @@ run_test "E2E: Workspace in database" \
     "docker exec kessel-postgres-rbac psql -U rbac -d rbac -c \"SELECT id FROM rbac.workspaces WHERE id = '$E2E_WS';\"" \
     "$E2E_WS"
 
-# Create host in new workspace
-E2E_HOST=$(curl -s -X POST http://localhost:8081/api/v1/hosts \
-    -H "Content-Type: application/json" \
-    -d '{
-        "display_name":"e2e-host",
-        "canonical_facts":{"fqdn":"e2e.test.com"},
-        "workspace_id":"'$E2E_WS'"
-    }' | jq -r '.id')
+# Note: Real HBI does not support host creation via REST.
+# Verify HBI is integrated and responds to API calls.
+E2E_HOST=""
 
-run_test "E2E: Host creation" \
-    "echo '$E2E_HOST'" \
+run_test "E2E: HBI list hosts responds" \
+    "curl -sf -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/hosts" \
     ""
-
-run_test "E2E: Host in database" \
-    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -c \"SELECT id FROM inventory.hosts WHERE id = '$E2E_HOST';\"" \
-    "$E2E_HOST"
-
-run_test "E2E: Host via Kessel API" \
-    "curl -sf http://localhost:8083/api/inventory/v1/resources/$E2E_HOST" \
-    "$E2E_HOST"
 
 echo ""
 
@@ -300,18 +280,20 @@ echo ""
 echo -e "${BLUE}=== 8. Error Handling Tests ===${NC}"
 
 run_test "Invalid JSON returns error" \
-    "curl -s -w '%{http_code}' -X POST http://localhost:8080/api/v1/workspaces \
+    "curl -s -w '%{http_code}' -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
         -H 'Content-Type: application/json' \
+        -H 'x-rh-identity: $RBAC_IDENTITY' \
         -d 'invalid json' | tail -c 3 | grep -E '^(400|500)$'" \
     ""
 
 run_test "Non-existent resource returns 404" \
-    "curl -s -w '%{http_code}' http://localhost:8080/api/v1/workspaces/00000000-0000-0000-0000-000000000000 | tail -c 3" \
+    "curl -s -w '%{http_code}' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/00000000-0000-0000-0000-000000000000 | tail -c 3" \
     "404"
 
 run_test "Missing required field returns 400" \
-    "curl -s -w '%{http_code}' -X POST http://localhost:8080/api/v1/workspaces \
+    "curl -s -w '%{http_code}' -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
         -H 'Content-Type: application/json' \
+        -H 'x-rh-identity: $RBAC_IDENTITY' \
         -d '{}' | tail -c 3" \
     "400"
 
@@ -323,17 +305,18 @@ echo ""
 echo -e "${BLUE}=== 9. Performance Tests ===${NC}"
 
 run_test "Health endpoint responds quickly (<1s)" \
-    "time timeout 1 curl -sf http://localhost:8080/health > /dev/null" \
+    "time timeout 1 curl -sf http://localhost:8080/api/rbac/v1/status/ > /dev/null" \
     ""
 
 run_test "Create operation completes quickly (<2s)" \
-    "time timeout 2 curl -sf -X POST http://localhost:8080/api/v1/workspaces \
+    "time timeout 2 curl -sf -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
         -H 'Content-Type: application/json' \
+        -H 'x-rh-identity: $RBAC_IDENTITY' \
         -d '{\"name\":\"perf-test\"}' > /dev/null" \
     ""
 
 run_test "Query operation completes quickly (<1s)" \
-    "time timeout 1 curl -sf http://localhost:8080/api/v1/workspaces > /dev/null" \
+    "time timeout 1 curl -sf -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/ > /dev/null" \
     ""
 
 echo ""
@@ -345,29 +328,23 @@ echo -e "${BLUE}=== 10. Cleanup Tests ===${NC}"
 
 log_info "Cleaning up test data..."
 
-run_test "Delete test host" \
-    "curl -sf -X DELETE http://localhost:8081/api/v1/hosts/$HOST_ID" \
-    ""
+log_info "Skipping host cleanup (no hosts created via REST)"
 
 run_test "Delete test workspace" \
-    "curl -sf -X DELETE http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID" \
+    "curl -sf -X DELETE -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/$WORKSPACE_ID/" \
     ""
 
-run_test "Delete E2E host" \
-    "curl -sf -X DELETE http://localhost:8081/api/v1/hosts/$E2E_HOST" \
-    ""
+log_info "Skipping E2E host cleanup (no hosts created via REST)"
 
 run_test "Delete E2E workspace" \
-    "curl -sf -X DELETE http://localhost:8080/api/v1/workspaces/$E2E_WS" \
+    "curl -sf -X DELETE -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/$E2E_WS/" \
     ""
 
 run_test "Verify workspace deleted" \
-    "curl -s -w '%{http_code}' http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID | tail -c 3" \
+    "curl -s -w '%{http_code}' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/$WORKSPACE_ID/ | tail -c 3" \
     "404"
 
-run_test "Verify host deleted" \
-    "curl -s -w '%{http_code}' http://localhost:8081/api/v1/hosts/$HOST_ID | tail -c 3" \
-    "404"
+log_info "Skipping host deletion verify (no hosts created via REST)"
 
 echo ""
 

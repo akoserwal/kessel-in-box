@@ -1,5 +1,6 @@
 # Kessel-in-a-Box: Insights Services (Phase 7)
-# Real insights-rbac from quay.io/cloudservices/rbac + insights-host-inventory mock
+# Real insights-rbac from quay.io/cloudservices/rbac
+# Real insights-host-inventory from quay.io/cloudservices/insights-inventory
 # RBAC replicates to Kessel via gRPC (REPLICATION_TO_RELATION_ENABLED)
 
 services:
@@ -151,51 +152,107 @@ services:
           memory: 256M
           cpus: '0.25'
 
-  # Insights Host Inventory Service - Host Management
-  # Dual-write pattern: Own DB + Direct API call to kessel-inventory-api
-  # Also triggers CDC: Inventory PostgreSQL → Debezium → Kafka → Inventory Consumer
-  insights-host-inventory:
-    build:
-      context: ../services/insights-host-inventory
-      dockerfile: Dockerfile
-    container_name: insights-host-inventory
-    ports:
-      - "${INSIGHTS_INVENTORY_PORT:-8081}:8081"
+  # Insights Host Inventory Migration - Runs Alembic migrations before the server starts
+  insights-inventory-migrate:
+    image: quay.io/cloudservices/insights-inventory:${INSIGHTS_INVENTORY_TAG:-latest}
+    container_name: insights-inventory-migrate
+    entrypoint: ["/bin/sh", "-c", "FLASK_APP=manage.py flask db upgrade"]
     environment:
-      # PostgreSQL Inventory database
-      POSTGRES_HOST: postgres-inventory
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: inventory
-      POSTGRES_USER: inventory
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
-      
-      # Kessel Inventory API (for direct calls)
-      KESSEL_INVENTORY_API_URL: http://kessel-inventory-api:8000
-      
-      # Logging
-      LOG_LEVEL: INFO
-      FLASK_ENV: production
+      INVENTORY_DB_HOST: postgres-inventory
+      INVENTORY_DB_PORT: "5432"
+      INVENTORY_DB_NAME: inventory
+      INVENTORY_DB_USER: inventory
+      INVENTORY_DB_PASS: ${POSTGRES_PASSWORD:-secretpassword}
+      INVENTORY_LOG_LEVEL: INFO
+      CLOWDER_ENABLED: ""
+      BYPASS_RBAC: "true"
+      BYPASS_KESSEL: "true"
+      BYPASS_UNLEASH: "true"
     depends_on:
       postgres-inventory:
         condition: service_healthy
-      kessel-inventory-api:
+    networks:
+      - kessel-network
+    restart: "no"
+
+  # Insights Host Inventory Service - Real RedHatInsights/insights-host-inventory
+  # Image: quay.io/cloudservices/insights-inventory
+  # Triggers CDC: Inventory PostgreSQL → Debezium → Kafka → Inventory Consumer
+  insights-host-inventory:
+    image: quay.io/cloudservices/insights-inventory:${INSIGHTS_INVENTORY_TAG:-latest}
+    container_name: insights-host-inventory
+    command: ["python", "run_gunicorn.py"]
+    ports:
+      - "${INSIGHTS_INVENTORY_PORT:-8081}:8080"
+    environment:
+      # PostgreSQL Inventory database
+      INVENTORY_DB_HOST: postgres-inventory
+      INVENTORY_DB_PORT: "5432"
+      INVENTORY_DB_NAME: inventory
+      INVENTORY_DB_USER: inventory
+      INVENTORY_DB_PASS: ${POSTGRES_PASSWORD:-secretpassword}
+
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+      # Local dev bypasses
+      BYPASS_RBAC: "true"
+      BYPASS_KESSEL: "true"
+      BYPASS_UNLEASH: "true"
+
+      # Logging
+      INVENTORY_LOG_LEVEL: INFO
+
+      # Disable Clowder (not running in ephemeral/CRC)
+      CLOWDER_ENABLED: ""
+    depends_on:
+      insights-inventory-migrate:
+        condition: service_completed_successfully
+      kafka:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - kessel-network
     deploy:
       resources:
         limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
           memory: 512M
           cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
+
+  # Insights Host Inventory MQ Consumer (optional) - Consumes host ingress messages
+  # Uncomment if hosts are created via Kafka ingress rather than direct API calls
+  # insights-inventory-mq:
+  #   image: quay.io/cloudservices/insights-inventory:${INSIGHTS_INVENTORY_TAG:-latest}
+  #   container_name: insights-inventory-mq
+  #   entrypoint: ["python3", "inv_mq_service.py"]
+  #   environment:
+  #     INVENTORY_DB_HOST: postgres-inventory
+  #     INVENTORY_DB_PORT: "5432"
+  #     INVENTORY_DB_NAME: inventory
+  #     INVENTORY_DB_USER: inventory
+  #     INVENTORY_DB_PASS: ${POSTGRES_PASSWORD:-secretpassword}
+  #     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  #     BYPASS_RBAC: "true"
+  #     BYPASS_KESSEL: "true"
+  #     BYPASS_UNLEASH: "true"
+  #     INVENTORY_LOG_LEVEL: INFO
+  #     CLOWDER_ENABLED: ""
+  #   depends_on:
+  #     insights-inventory-migrate:
+  #       condition: service_completed_successfully
+  #     kafka:
+  #       condition: service_healthy
+  #   networks:
+  #     - kessel-network
+  #   restart: unless-stopped
 
 networks:
   kessel-network:

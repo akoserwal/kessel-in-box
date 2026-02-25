@@ -30,23 +30,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Service health check configurations
+# Internal container ports (not host-mapped ports):
+#   kessel-relations-api: HTTP 8000 (POST /api/authz/v1beta1/tuples), gRPC 9000
+#   kessel-inventory-api: HTTP 8000 (/api/kessel/v1/livez), gRPC 9000
+#   insights-rbac:        HTTP 8080 (/api/rbac/v1/status/)
+#   insights-host-inventory: HTTP 8080 (/health) — returns 200 with empty body
 SERVICES = {
-    'inventory-api': {
-        'url': 'http://kessel-inventory-api:8000/api/kessel/v1/livez',
-        'timeout': 5,
-    },
     'relations-api': {
         'url': 'http://kessel-relations-api:8000/api/authz/v1beta1/tuples',
         'timeout': 5,
         'method': 'POST',
         'body': '{"tuples":[]}',
     },
+    'inventory-api': {
+        'url': 'http://kessel-inventory-api:8000/api/kessel/v1/livez',
+        'timeout': 5,
+    },
     'rbac': {
-        'url': 'http://insights-rbac:8080/health',
+        'url': 'http://insights-rbac:8080/api/rbac/v1/status/',
         'timeout': 5,
     },
     'host-inventory': {
-        'url': 'http://insights-host-inventory:8081/health',
+        'url': 'http://insights-host-inventory:8080/health',
         'timeout': 5,
     },
 }

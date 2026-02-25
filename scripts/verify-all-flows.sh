@@ -69,7 +69,7 @@ echo ""
 echo -e "${BLUE}=== 1. Service Health Checks (REST) ===${NC}"
 
 run_test "Insights RBAC health" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/health" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/rbac/v1/status/" \
     "01-insights-rbac-health.json"
 
 run_test "Insights Host Inventory health" \
@@ -77,11 +77,11 @@ run_test "Insights Host Inventory health" \
     "02-insights-inventory-health.json"
 
 run_test "Kessel Relations API health" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8082/health" \
+    "grpcurl -plaintext localhost:9001 grpc.health.v1.Health/Check" \
     "03-kessel-relations-health.json"
 
 run_test "Kessel Inventory API health" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8083/health" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8083/api/kessel/v1/livez" \
     "04-kessel-inventory-health.json"
 
 run_test "SpiceDB health" \
@@ -95,16 +95,15 @@ echo ""
 # ============================================
 echo -e "${BLUE}=== 2. Insights RBAC API Tests (REST) ===${NC}"
 
+# Real RBAC requires x-rh-identity header with auth_type
+RBAC_IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"test_user","email":"test@example.com","is_org_admin":true}}}' | base64)
+
 # Create workspace
 log_info "Creating test workspace..."
-WORKSPACE_RESPONSE=$(curl -s -X POST http://localhost:8080/api/v1/workspaces \
+WORKSPACE_RESPONSE=$(curl -s -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
     -H "Content-Type: application/json" \
-    -d '{
-        "name": "verification-workspace",
-        "description": "Automated verification test workspace",
-        "type": "standard",
-        "parent_id": null
-    }')
+    -H "x-rh-identity: $RBAC_IDENTITY" \
+    -d '{"name": "verification-workspace"}')
 
 echo "$WORKSPACE_RESPONSE" > "$OUTPUT_DIR/06-create-workspace-request.json"
 WORKSPACE_ID=$(echo "$WORKSPACE_RESPONSE" | jq -r '.id // empty')
@@ -118,49 +117,24 @@ else
 fi
 
 run_test "Get workspace by ID" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/$WORKSPACE_ID/" \
     "07-get-workspace.json"
 
 run_test "List all workspaces" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/" \
     "08-list-workspaces.json"
 
-run_test "Update workspace" \
-    "curl -s -X PUT -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID \
-        -H 'Content-Type: application/json' \
-        -d '{\"name\":\"verification-workspace-updated\",\"description\":\"Updated description\"}'" \
-    "09-update-workspace.json"
+run_test "List RBAC roles (v1)" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v1/roles/" \
+    "09-list-roles.json"
 
-# Create role in workspace (may not be supported by insights-rbac)
-log_info "Attempting to create test role..."
-ROLE_RESPONSE=$(curl -s -X POST http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID/roles \
-    -H "Content-Type: application/json" \
-    -d '{
-        "name": "test-role",
-        "description": "Test role for verification",
-        "permissions": ["read", "write"]
-    }' 2>&1 || echo '{"error":"Role endpoint not supported"}')
+run_test "List RBAC groups (v1)" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v1/groups/" \
+    "10-list-groups.json"
 
-echo "$ROLE_RESPONSE" > "$OUTPUT_DIR/10-create-role-request.json"
-ROLE_ID=$(echo "$ROLE_RESPONSE" | jq -r '.id // empty' 2>/dev/null || echo "")
-
-if [ -n "$ROLE_ID" ] && [ "$ROLE_ID" != "null" ]; then
-    log_success "Role created: $ROLE_ID"
-    echo "$ROLE_ID" > "$OUTPUT_DIR/role_id.txt"
-else
-    log_warn "Role creation not supported or failed (expected for some deployments)"
-    ROLE_ID=""
-fi
-
-# Only try to list roles if we could create one
-if [ -n "$ROLE_ID" ]; then
-    run_test "List workspace roles" \
-        "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID/roles" \
-        "11-list-roles.json"
-else
-    log_info "Skipping role listing (role creation not supported)"
-    echo '{"message":"Skipped - role creation not supported"}' > "$OUTPUT_DIR/11-list-roles.json"
-fi
+ROLE_ID=""
+log_info "Skipping role listing per workspace (not supported by real RBAC v2)"
+echo '{"message":"Skipped - workspace-scoped roles not in v2 API"}' > "$OUTPUT_DIR/11-list-roles.json"
 
 echo ""
 
@@ -169,61 +143,25 @@ echo ""
 # ============================================
 echo -e "${BLUE}=== 3. Insights Host Inventory API Tests (REST) ===${NC}"
 
-# Create host
-log_info "Creating test host..."
-HOST_RESPONSE=$(curl -s -X POST http://localhost:8081/api/v1/hosts \
-    -H "Content-Type: application/json" \
-    -d '{
-        "display_name": "verification-host-01",
-        "canonical_facts": {
-            "fqdn": "verification-host-01.example.com",
-            "insights_id": "12345678-1234-1234-1234-123456789012"
-        },
-        "workspace_id": "'$WORKSPACE_ID'",
-        "system_profile": {
-            "os_release": "Red Hat Enterprise Linux 8.5",
-            "arch": "x86_64",
-            "cpu_count": 4,
-            "memory": "16GB"
-        },
-        "tags": [
-            {"namespace": "env", "key": "environment", "value": "production"},
-            {"namespace": "app", "key": "application", "value": "web-server"}
-        ]
-    }')
+# Real HBI requires x-rh-identity header with auth_type
+HBI_IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"test_user","email":"test@example.com","is_org_admin":true}}}' | base64)
 
-echo "$HOST_RESPONSE" > "$OUTPUT_DIR/12-create-host-request.json"
-HOST_ID=$(echo "$HOST_RESPONSE" | jq -r '.id // empty')
-
-if [ -n "$HOST_ID" ]; then
-    log_success "Host created: $HOST_ID"
-    echo "$HOST_ID" > "$OUTPUT_DIR/host_id.txt"
-else
-    log_fail "Failed to create host"
-    HOST_ID="00000000-0000-0000-0000-000000000000"
-fi
-
-run_test "Get host by ID" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts/$HOST_ID" \
-    "13-get-host.json"
+# Note: The real HBI does not support host creation via REST API.
+# Hosts are created via Kafka ingress (platform.inventory.host-ingress topic).
+# These tests verify the API is responsive and correctly handles requests.
+HOST_ID=""
 
 run_test "List all hosts" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/hosts" \
     "14-list-hosts.json"
 
-run_test "Get hosts by workspace" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts?workspace_id=$WORKSPACE_ID" \
-    "15-list-hosts-by-workspace.json"
+run_test "Get hosts by display name" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $HBI_IDENTITY' 'http://localhost:8081/api/inventory/v1/hosts?display_name=test'" \
+    "15-list-hosts-by-display-name.json"
 
-run_test "Update host" \
-    "curl -s -X PUT -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts/$HOST_ID \
-        -H 'Content-Type: application/json' \
-        -d '{\"display_name\":\"verification-host-01-updated\"}'" \
-    "16-update-host.json"
-
-run_test "Get host tags" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts/$HOST_ID/tags" \
-    "17-get-host-tags.json"
+run_test "Get host tags endpoint" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/tags" \
+    "17-get-tags.json"
 
 echo ""
 
@@ -400,7 +338,7 @@ run_test "Verify workspace in RBAC database" \
     "33-verify-workspace-in-db.txt"
 
 run_test "Verify host in Inventory database" \
-    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -t -c \"SELECT id, display_name FROM inventory.hosts WHERE id = '$HOST_ID';\"" \
+    "docker exec kessel-postgres-inventory psql -U inventory -d inventory -t -c \"SELECT id, display_name FROM hbi.hosts WHERE id = '$HOST_ID';\"" \
     "34-verify-host-in-db.txt"
 
 run_test "Verify resource in Inventory database" \
@@ -421,29 +359,20 @@ echo -e "${BLUE}=== 9. Integration Flow Tests ===${NC}"
 # Test: Create workspace -> Create host in workspace -> Verify via Kessel API
 log_info "Testing end-to-end flow: Workspace -> Host -> Kessel API"
 
-E2E_WORKSPACE=$(curl -s -X POST http://localhost:8080/api/v1/workspaces \
+E2E_WORKSPACE=$(curl -s -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
     -H "Content-Type: application/json" \
+    -H "x-rh-identity: $RBAC_IDENTITY" \
     -d '{"name":"e2e-flow-workspace"}' | jq -r '.id')
 
 echo "$E2E_WORKSPACE" > "$OUTPUT_DIR/37-e2e-workspace-id.txt"
 
-E2E_HOST=$(curl -s -X POST http://localhost:8081/api/v1/hosts \
-    -H "Content-Type: application/json" \
-    -d '{
-        "display_name":"e2e-flow-host",
-        "canonical_facts":{"fqdn":"e2e.example.com"},
-        "workspace_id":"'$E2E_WORKSPACE'"
-    }' | jq -r '.id')
+E2E_HOST=""
 
-echo "$E2E_HOST" > "$OUTPUT_DIR/38-e2e-host-id.txt"
-
-run_test "E2E: Verify host via Kessel Inventory API" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8083/api/inventory/v1/resources/$E2E_HOST" \
-    "39-e2e-verify-via-kessel.json"
-
-run_test "E2E: Verify workspace has hosts" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts?workspace_id=$E2E_WORKSPACE" \
-    "40-e2e-workspace-hosts.json"
+# Note: Real HBI does not support host creation via REST.
+# Verify HBI list endpoint responds correctly.
+run_test "E2E: Verify HBI list hosts responds" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/hosts" \
+    "40-e2e-host-list.json"
 
 echo ""
 
@@ -453,22 +382,24 @@ echo ""
 echo -e "${BLUE}=== 10. Error Handling Tests ===${NC}"
 
 run_test "Test 404 - Non-existent workspace" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces/00000000-0000-0000-0000-000000000000" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $RBAC_IDENTITY' http://localhost:8080/api/rbac/v2/workspaces/00000000-0000-0000-0000-000000000000/" \
     "41-error-404-workspace.json"
 
 run_test "Test 404 - Non-existent host" \
-    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8081/api/v1/hosts/00000000-0000-0000-0000-000000000000" \
+    "curl -s -w '\nHTTP_STATUS:%{http_code}\n' -H 'x-rh-identity: $HBI_IDENTITY' http://localhost:8081/api/inventory/v1/hosts/00000000-0000-0000-0000-000000000000" \
     "42-error-404-host.json"
 
 run_test "Test 400 - Invalid JSON" \
-    "curl -s -X POST -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces \
+    "curl -s -X POST -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/rbac/v2/workspaces/ \
         -H 'Content-Type: application/json' \
+        -H 'x-rh-identity: $RBAC_IDENTITY' \
         -d 'invalid json{'" \
     "43-error-400-invalid-json.json"
 
 run_test "Test 400 - Missing required field" \
-    "curl -s -X POST -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/v1/workspaces \
+    "curl -s -X POST -w '\nHTTP_STATUS:%{http_code}\n' http://localhost:8080/api/rbac/v2/workspaces/ \
         -H 'Content-Type: application/json' \
+        -H 'x-rh-identity: $RBAC_IDENTITY' \
         -d '{}'" \
     "44-error-400-missing-field.json"
 
@@ -483,15 +414,16 @@ log_info "Testing response times..."
 
 # Health endpoint performance
 START=$(date +%s%N)
-curl -s http://localhost:8080/health > /dev/null
+curl -s http://localhost:8080/api/rbac/v1/status/ > /dev/null
 END=$(date +%s%N)
 HEALTH_TIME=$(( (END - START) / 1000000 ))
 echo "Health endpoint: ${HEALTH_TIME}ms" > "$OUTPUT_DIR/45-performance-health.txt"
 
 # Create operation performance
 START=$(date +%s%N)
-curl -s -X POST http://localhost:8080/api/v1/workspaces \
+curl -s -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
     -H "Content-Type: application/json" \
+    -H "x-rh-identity: $RBAC_IDENTITY" \
     -d '{"name":"perf-test-workspace"}' > /dev/null
 END=$(date +%s%N)
 CREATE_TIME=$(( (END - START) / 1000000 ))
@@ -499,7 +431,7 @@ echo "Create workspace: ${CREATE_TIME}ms" > "$OUTPUT_DIR/46-performance-create.t
 
 # Query operation performance
 START=$(date +%s%N)
-curl -s http://localhost:8080/api/v1/workspaces > /dev/null
+curl -s -H "x-rh-identity: $RBAC_IDENTITY" http://localhost:8080/api/rbac/v2/workspaces/ > /dev/null
 END=$(date +%s%N)
 QUERY_TIME=$(( (END - START) / 1000000 ))
 echo "List workspaces: ${QUERY_TIME}ms" > "$OUTPUT_DIR/47-performance-query.txt"
@@ -536,11 +468,9 @@ if [ "${CLEANUP:-true}" = "true" ]; then
     log_info "Cleaning up test data..."
 
     # Delete created resources
-    [ -n "$E2E_HOST" ] && curl -s -X DELETE http://localhost:8081/api/v1/hosts/$E2E_HOST > "$OUTPUT_DIR/51-cleanup-e2e-host.json" 2>&1
-    [ -n "$E2E_WORKSPACE" ] && curl -s -X DELETE http://localhost:8080/api/v1/workspaces/$E2E_WORKSPACE > "$OUTPUT_DIR/52-cleanup-e2e-workspace.json" 2>&1
-    [ -n "$RESOURCE_ID" ] && curl -s -X DELETE http://localhost:8083/api/inventory/v1/resources/$RESOURCE_ID > "$OUTPUT_DIR/53-cleanup-resource.json" 2>&1
-    [ -n "$HOST_ID" ] && curl -s -X DELETE http://localhost:8081/api/v1/hosts/$HOST_ID > "$OUTPUT_DIR/54-cleanup-host.json" 2>&1
-    [ -n "$WORKSPACE_ID" ] && curl -s -X DELETE http://localhost:8080/api/v1/workspaces/$WORKSPACE_ID > "$OUTPUT_DIR/55-cleanup-workspace.json" 2>&1
+    # HBI hosts cannot be deleted via REST (read-only API)
+    [ -n "$E2E_WORKSPACE" ] && curl -s -X DELETE -H "x-rh-identity: $RBAC_IDENTITY" "http://localhost:8080/api/rbac/v2/workspaces/$E2E_WORKSPACE/" > "$OUTPUT_DIR/52-cleanup-e2e-workspace.json" 2>&1
+    [ -n "$WORKSPACE_ID" ] && curl -s -X DELETE -H "x-rh-identity: $RBAC_IDENTITY" "http://localhost:8080/api/rbac/v2/workspaces/$WORKSPACE_ID/" > "$OUTPUT_DIR/55-cleanup-workspace.json" 2>&1
 
     log_success "Cleanup complete"
 else

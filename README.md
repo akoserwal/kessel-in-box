@@ -1,30 +1,32 @@
-# Kessel-in-a-Box 📦
+# Kessel-in-a-Box
 
 **Complete local development environment for Kessel authorization platform**
 
 A production-aligned, event-driven authorization system demonstrating Google Zanzibar-based Relationship-Based Access Control (ReBAC) with Change Data Capture (CDC) integration.
 
-## 🎯 What is Kessel-in-a-Box?
+## What is Kessel-in-a-Box?
 
-Kessel-in-a-box is a **complete, working implementation** of Red Hat's Kessel platform that runs entirely on your local machine. It demonstrates:
+Kessel-in-a-box is a **complete, working implementation** of Red Hat's Kessel platform that runs entirely on your local machine using real upstream service images. It demonstrates:
 
-- ✅ **ReBAC Authorization** using SpiceDB (Google Zanzibar)
-- ✅ **Event-Driven Architecture** with Kafka CDC pipeline
-- ✅ **Microservices Integration** with Kessel APIs
-- ✅ **Real Application Patterns** (RBAC and Host Inventory)
-- ✅ **Production-Aligned Architecture** matching Red Hat's hosted deployment
+- **ReBAC Authorization** using SpiceDB (Google Zanzibar)
+- **Event-Driven Architecture** with Kafka CDC pipeline
+- **Microservices Integration** with Kessel APIs
+- **Real Application Patterns** (RBAC and Host Inventory)
+- **Production-Aligned Architecture** matching Red Hat's hosted deployment
 
+All services use real upstream images from `quay.io/cloudservices` and other official sources — no mocks.
 
-
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                   APPLICATION LAYER                         │
 │  insights-rbac (8080)      insights-host-inventory (8081)   │
+│  quay.io/cloudservices/rbac  quay.io/cloudservices/         │
+│                              insights-inventory             │
 └─────────────────┬─────────────────────┬─────────────────────┘
-                  │                     │
-                  ↓ CDC                 ↓ CDC + Direct API
+                  │ CDC                 │ CDC (Kafka ingress)
+                  ↓                     ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    EVENT STREAMING LAYER                    │
 │  PostgreSQL → Debezium → Kafka → Consumers                  │
@@ -33,219 +35,251 @@ Kessel-in-a-box is a **complete, working implementation** of Red Hat's Kessel pl
                   ↓                     ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    KESSEL PLATFORM LAYER                    │
-│  kessel-relations-api (8082)  kessel-inventory-api (8083)   │
+│  kessel-relations-api (8082/9001)  kessel-inventory-api     │
+│                                    (8083/9002)              │
 └─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ↓ gRPC
+                              │ gRPC
+                              ↓
 ┌─────────────────────────────────────────────────────────────┐
 │              AUTHORIZATION ENGINE LAYER                     │
-│  SpiceDB (50051) → PostgreSQL (5434)                        │
+│  SpiceDB (50051/8443) → PostgreSQL (5434)                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
 - Docker/Podman and Docker Compose V2
-- 8GB RAM minimum
-- 20GB disk space
+- `grpcurl` (for gRPC health checks and demo)
+- 8GB RAM minimum, 20GB disk space
 
-### Pre-Deployment Check (Recommended)
-
-Verify your system is ready before deploying:
+### Deploy Everything
 
 ```bash
-# Check prerequisites and port availability
+# Check prerequisites and port availability first
 ./scripts/precheck.sh
 
-# If ports are blocked, auto-cleanup
-./scripts/precheck.sh --kill
-```
-
-This verifies Docker, Podman, Docker Compose, and checks that all required ports are available.
-
-### Deploy Everything (One Command)
-
-```bash
-# Deploy all phases (5-10 min) - RECOMMENDED
+# Deploy all services
 ./scripts/deploy.sh
-
 ```
 
-**What deploys:**
-- Kessel Services (relations-api, inventory-api, SpiceDB)
-- CDC Infrastructure (Kafka, Debezium, CDC consumers) ← Included!
-- Insights Services (rbac, host-inventory)
-
-### Deploy Individual Phases (Alternative)
-
-# Test everything
-```
-./scripts/run-all-tests.sh
-```
-
-### First API Call
+### Run the Demo
 
 ```bash
-# Create a workspace
-curl -X POST http://localhost:8080/api/v1/workspaces \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-workspace", "description": "My first workspace"}'
+# Set up demo data (verifies all services)
+./scripts/demo-setup.sh
 
-# Create a host
-curl -X POST http://localhost:8081/api/v1/hosts \
-  -H "Content-Type: application/json" \
-  -d '{"display_name": "my-host", "canonical_facts": {"fqdn": "host.local"}}'
-
-# List workspaces
-curl http://localhost:8080/api/v1/workspaces | jq
+# Run interactive authorization demo (5 scenarios)
+./scripts/demo-run.sh
 ```
 
-## 📋 What's Included
+## Service Endpoints
 
-### Kessel Services
+### Insights Services (Application Layer)
 
-**Core authorization platform**
+| Service | HTTP | Purpose |
+|---------|------|---------|
+| insights-rbac | `http://localhost:8080` | RBAC management (workspaces, roles, groups) |
+| insights-host-inventory | `http://localhost:8081` | Host inventory (read-only REST; write via Kafka) |
 
-- **SpiceDB** (50051) - Google Zanzibar authorization engine
-- **kessel-relations-api** (8082) - SpiceDB frontend
-- **kessel-inventory-api** (8083) - Resource management + authz proxy
-- **3 PostgreSQL instances** (5432, 5433, 5434) - Data persistence
+All requests to insights services require an `x-rh-identity` header (base64-encoded JSON):
 
+```bash
+IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"admin","email":"admin@example.com","is_org_admin":true}}}' | base64)
+```
 
-### CDC Pipeline
+**RBAC API paths:**
 
-**Event-driven data replication**
+```bash
+# Health / status
+curl http://localhost:8080/api/rbac/v1/status/
 
-- **Kafka + Zookeeper** (9092, 2181) - Event streaming
-- **Debezium connectors** (8085) - CDC from PostgreSQL
-- **Relations Sink** - RBAC events → Relations API
-- **Inventory Consumer** - Inventory events → Inventory API
-- **Kafka UI** (8086) - Web interface
+# List workspaces (v2 API)
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8080/api/rbac/v2/workspaces/
 
-### Insights Services
+# Create a workspace
+curl -X POST http://localhost:8080/api/rbac/v2/workspaces/ \
+  -H "Content-Type: application/json" \
+  -H "x-rh-identity: $IDENTITY" \
+  -d '{"name": "my-workspace"}'
 
-**Application integration examples**
+# List groups / roles
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8080/api/rbac/v1/groups/
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8080/api/rbac/v1/roles/
+```
 
-- **insights-rbac** (8080) - Workspace/role management
-- **insights-host-inventory** (8081) - Host/asset inventory
-- **CDC integration** - Automatic replication to Kessel
-- **Dual-write pattern** - Direct API + CDC backup
+**Host Inventory API paths:**
 
-## 📊 Service Ports
+```bash
+# Health check (returns 200 with empty body)
+curl -sf http://localhost:8081/health
+
+# List hosts
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8081/api/inventory/v1/hosts
+
+# Get host tags
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8081/api/inventory/v1/tags
+
+# Note: Host creation goes via Kafka ingress (platform.inventory.host-ingress topic),
+# not via REST POST. The REST API is read-only for hosts.
+```
+
+### Kessel Platform (Authorization Layer)
+
+Both Kessel APIs are **gRPC-primary**. HTTP is available for some endpoints.
+
+| Service | HTTP | gRPC | Purpose |
+|---------|------|------|---------|
+| kessel-relations-api | `http://localhost:8082` | `localhost:9001` | Relationship management |
+| kessel-inventory-api | `http://localhost:8083` | `localhost:9002` | Resource inventory + authz proxy |
+
+```bash
+# Relations API — gRPC health
+grpcurl -plaintext localhost:9001 grpc.health.v1.Health/Check
+
+# Create a relationship tuple
+grpcurl -plaintext -d '{"tuples":[{"resource":{"type":{"namespace":"rbac","name":"group"},"id":"engineering"},"relation":"t_member","subject":{"subject":{"type":{"namespace":"rbac","name":"principal"},"id":"alice"}}}],"upsert":true}' \
+  localhost:9001 kessel.relations.v1beta1.KesselTupleService/CreateTuples
+
+# Check a permission (rbac/* resources)
+grpcurl -plaintext -d '{"resource":{"type":{"namespace":"rbac","name":"workspace"},"id":"production"},"relation":"inventory_host_view","subject":{"subject":{"type":{"namespace":"rbac","name":"principal"},"id":"alice"}}}' \
+  localhost:9001 kessel.relations.v1beta1.KesselCheckService/Check
+
+# Inventory API — gRPC health
+grpcurl -plaintext localhost:9002 grpc.health.v1.Health/Check
+
+# Check a permission (hbi/* resources — routes through Inventory API → Relations API)
+grpcurl -plaintext -d '{"object":{"resource_type":"host","resource_id":"web-server-01","reporter":{"type":"hbi"}},"relation":"view","subject":{"resource":{"resource_type":"principal","resource_id":"alice","reporter":{"type":"rbac"}}}}' \
+  localhost:9002 kessel.inventory.v1beta2.KesselInventoryService/Check
+
+# Inventory API HTTP — livez endpoint
+curl http://localhost:8083/api/kessel/v1/livez
+```
+
+### Authorization Engine
+
+```bash
+# SpiceDB health
+curl http://localhost:8443/healthz
+
+# SpiceDB gRPC (used internally by kessel-relations-api)
+# localhost:50051
+
+# SpiceDB Prometheus metrics
+curl http://localhost:9090/metrics | head -20
+```
+
+### Infrastructure
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| **Insights Services** | | |
-| insights-rbac | 8080 | Workspace management |
-| insights-host-inventory | 8081 | Host inventory |
-| **Kessel Platform** | | |
-| kessel-relations-api | 8082 | Authorization API |
-| kessel-inventory-api | 8083 | Resource API |
-| **Authorization Engine** | | |
-| SpiceDB gRPC | 50051 | Zanzibar engine |
-| SpiceDB HTTP | 8443 | REST API |
-| SpiceDB Metrics | 9090 | Prometheus |
-| **Data Layer** | | |
-| PostgreSQL RBAC | 5432 | RBAC database |
-| PostgreSQL Inventory | 5433 | Inventory database |
-| PostgreSQL SpiceDB | 5434 | Authorization data |
-| **Event Streaming** | | |
-| Kafka | 9092 | Event broker |
-| Kafka Connect | 8085 | Debezium REST |
-| Kafka UI | 8086 | Web interface |
-| Zookeeper | 2181 | Kafka coordination |
+| PostgreSQL RBAC | `5432` | Insights RBAC database |
+| PostgreSQL Inventory | `5433` | Insights HBI database (`hbi` schema) |
+| PostgreSQL SpiceDB | `5434` | SpiceDB relationship storage |
+| Kafka | `9092` | Event broker |
+| Kafka Connect | `8085` | Debezium REST API |
+| Kafka UI | `8086` | Web UI — `http://localhost:8086` |
+| Zookeeper | `2181` | Kafka coordination |
+| Redis | `6379` | RBAC Celery broker |
 
-## 🔄 Data Flows
+### Observability
 
-### Flow 1: Workspace Creation (CDC Pattern)
+| Service | Port | Purpose |
+|---------|------|---------|
+| Prometheus | `9091` | Metrics — `http://localhost:9091` |
+| Grafana | `3000` | Dashboards — `http://localhost:3000` (admin/admin) |
+| AlertManager | `9093` | Alerts — `http://localhost:9093` |
+
+### Monitoring Dashboard
+
+```bash
+# Start the local monitoring dashboard
+cd monitoring && python3 app.py
+
+# Opens at http://localhost:8888
+```
+
+## Data Flows
+
+### Flow 1: Workspace Creation (RBAC → CDC → SpiceDB)
 
 ```
-User → insights-rbac API
+User → POST /api/rbac/v2/workspaces/ (x-rh-identity required)
     ↓ INSERT INTO rbac.workspaces
-PostgreSQL RBAC
-    ↓ WAL → Debezium
+PostgreSQL RBAC (wal_level=logical)
+    ↓ WAL → Debezium (rbac-connector)
 Kafka Topic: rbac.workspaces.events
-    ↓ Consumer
-Relations Sink
-    ↓ POST /v1/relationships
-kessel-relations-api
-    ↓ gRPC WriteRelationships()
+    ↓ rbac-consumer (Go)
+kessel-relations-api gRPC: CreateTuples
+    ↓ WriteRelationships()
 SpiceDB
 ```
 
-**Latency**: 2-5 seconds (eventual consistency)
+**Latency**: 2–5 seconds (eventual consistency via CDC)
 
-### Flow 2: Host Registration (Dual-Write Pattern)
+### Flow 2: Host Registration (Kafka Ingress)
 
 ```
-User → insights-host-inventory API
-    ├─→ INSERT INTO inventory.hosts (CDC backup)
-    │       ↓ WAL → Debezium → Kafka → Inventory Consumer
-    │
-    └─→ Direct POST /v1/resources to kessel-inventory-api (fast path)
-            ↓ Store + CreateTuples()
-        PostgreSQL Inventory + SpiceDB
+Host agent → Kafka Topic: platform.inventory.host-ingress
+    ↓ inv_mq_service.py (MQ consumer — optional)
+insights-host-inventory: process and persist
+    ↓ INSERT INTO hbi.hosts
+PostgreSQL Inventory (wal_level=logical)
+    ↓ WAL → Debezium (inventory-connector)
+Kafka Topic: platform.inventory.events
+    ↓ inventory-consumer
+kessel-inventory-api gRPC: ReportResource
+    ↓ CreateTuples() in SpiceDB
+SpiceDB
 ```
 
-**Latency**: < 100ms (synchronous API call)
+**Note**: The HBI REST API (`/api/inventory/v1/hosts`) is read-only. Host ingestion goes via Kafka.
 
-## 🧪 Testing
+### Flow 3: Permission Check
 
-### Automated Tests
+```
+App → kessel-inventory-api gRPC: Check (hbi/* resources)
+   OR kessel-relations-api gRPC: Check (rbac/* resources)
+    ↓
+kessel-relations-api → SpiceDB: CheckPermission
+    ↓ Graph traversal through relationship tuples
+SpiceDB → ALLOWED_TRUE / ALLOWED_FALSE
+```
+
+**Latency**: 5–50ms
+
+## Testing
 
 ```bash
-# Run complete test suite (infrastructure, APIs, CDC, integration, e2e)
+# Full test suite
 ./scripts/run-all-tests.sh
+
+# Service health validation
+./scripts/validate.sh
+
+# Comprehensive flow verification
+./scripts/verify-all-flows.sh
 ```
 
-### Manual Testing
-
-```bash
-# Create workspace and verify CDC
-WORKSPACE_ID=$(curl -s -X POST http://localhost:8080/api/v1/workspaces \
-  -H "Content-Type: application/json" \
-  -d '{"name": "test"}' | jq -r '.id')
-
-# Wait for CDC
-sleep 3
-
-# Check Kafka
-docker exec kessel-kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic rbac.workspaces.events \
-  --from-beginning --max-messages 5 | grep "$WORKSPACE_ID"
-```
-
-## 🛠️ Management
+## Management
 
 ### View Logs
 
 ```bash
 # All services
-docker compose -f compose/docker-compose.yml \
-               -f compose/docker-compose.kessel.yml \
-               -f compose/docker-compose.kafka.yml \
-               -f compose/docker-compose.insights.yml logs -f
+docker compose \
+  -f compose/docker-compose.yml \
+  -f compose/docker-compose.kessel.yml \
+  -f compose/docker-compose.kafka.yml \
+  -f compose/docker-compose.insights.yml \
+  logs -f
 
 # Specific service
 docker logs -f insights-rbac
+docker logs -f insights-host-inventory
 docker logs -f kessel-relations-api
-docker logs -f kessel-relations-sink
-```
-
-### Monitor CDC
-
-```bash
-# Kafka UI
-open http://localhost:8086
-
-# Debezium connectors
-curl http://localhost:8085/connectors | jq
-
-# Connector status
-curl http://localhost:8085/connectors/rbac-postgres-connector/status | jq
+docker logs -f kessel-inventory-api
 ```
 
 ### Database Access
@@ -254,60 +288,95 @@ curl http://localhost:8085/connectors/rbac-postgres-connector/status | jq
 # RBAC database
 docker exec -it kessel-postgres-rbac psql -U rbac -d rbac
 
-# Inventory database
+# Inventory database (HBI uses hbi schema)
 docker exec -it kessel-postgres-inventory psql -U inventory -d inventory
+# \dt hbi.*   — list HBI tables (created by Alembic)
 
 # SpiceDB database
 docker exec -it kessel-postgres-spicedb psql -U spicedb -d spicedb
 ```
 
-## 🔧 Troubleshooting
+### Monitor CDC
 
-### Common Issues
-
-**Services won't start**
 ```bash
-# Check logs
-docker logs <service-name>
+# Debezium connector status
+curl http://localhost:8085/connectors | jq
+curl http://localhost:8085/connectors/rbac-postgres-connector/status | jq
 
-# Check dependencies
-docker ps | grep kessel
-
-# Restart
-./scripts/setup-phase5.sh restart
-```
-
-**CDC not working**
-```bash
-# Check Kafka
-docker ps | grep kafka
-
-# Check Debezium
-curl http://localhost:8085/connectors
-
-# Restart connector
+# Restart a connector
 curl -X POST http://localhost:8085/connectors/rbac-postgres-connector/restart
+
+# Kafka UI
+open http://localhost:8086
 ```
 
-**Database connection errors**
+## Troubleshooting
+
+### Services won't start
+
 ```bash
-# Test connectivity
-docker exec kessel-postgres-rbac pg_isready -U rbac
-docker exec kessel-postgres-inventory pg_isready -U inventory
-
-# Check replication slots
-docker exec kessel-postgres-rbac psql -U rbac -d rbac -c \
-  "SELECT * FROM pg_replication_slots;"
+docker logs <container-name>
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
-See full troubleshooting guides in each phase's README.
+### HBI returns 401/400 errors
 
-## 📖 References
+The real HBI requires a valid `x-rh-identity` header on every request. The header must include `auth_type`:
 
-### External Documentation
-- [Kessel Project](https://github.com/project-kessel)
+```bash
+IDENTITY=$(echo -n '{"identity":{"account_number":"12345","org_id":"12345","type":"User","auth_type":"basic-auth","user":{"username":"admin","email":"admin@example.com","is_org_admin":true}}}' | base64)
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8081/api/inventory/v1/hosts
+```
+
+### HBI returns 405 on POST /hosts
+
+The real HBI REST API is **read-only**. Host creation is only supported via Kafka ingress on the `platform.inventory.host-ingress` topic. Use GET to list hosts:
+
+```bash
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8081/api/inventory/v1/hosts
+```
+
+### RBAC returns 404 on /api/v1/workspaces
+
+RBAC workspaces are on the **v2** API. Groups and roles remain on v1:
+
+```bash
+# Workspaces — v2
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8080/api/rbac/v2/workspaces/
+
+# Groups, roles — v1
+curl -H "x-rh-identity: $IDENTITY" http://localhost:8080/api/rbac/v1/groups/
+```
+
+### Kessel APIs return 404 on /health
+
+Both Kessel APIs are gRPC-primary — `curl .../health` returns 404. Use gRPC or the correct HTTP paths:
+
+```bash
+grpcurl -plaintext localhost:9001 grpc.health.v1.Health/Check  # Relations API
+grpcurl -plaintext localhost:9002 grpc.health.v1.Health/Check  # Inventory API
+curl http://localhost:8083/api/kessel/v1/livez                 # Inventory API HTTP livez
+curl http://localhost:8080/api/rbac/v1/status/                 # RBAC status
+```
+
+### CDC not working
+
+```bash
+# Check replication slots
+docker exec kessel-postgres-rbac psql -U rbac -d rbac -c "SELECT * FROM pg_replication_slots;"
+docker exec kessel-postgres-inventory psql -U inventory -d inventory -c "SELECT * FROM pg_replication_slots;"
+
+# Verify WAL level
+docker exec kessel-postgres-inventory psql -U inventory -c "SHOW wal_level;"
+# Should return: logical
+```
+
+## References
+
+- [project-kessel/relations-api](https://github.com/project-kessel/relations-api)
+- [project-kessel/inventory-api](https://github.com/project-kessel/inventory-api)
+- [RedHatInsights/insights-rbac](https://github.com/RedHatInsights/insights-rbac)
+- [RedHatInsights/insights-host-inventory](https://github.com/RedHatInsights/insights-host-inventory)
 - [SpiceDB Documentation](https://authzed.com/docs/spicedb)
 - [Debezium Documentation](https://debezium.io/documentation/)
 - [Google Zanzibar Paper](https://research.google/pubs/pub48190/)
-
-
